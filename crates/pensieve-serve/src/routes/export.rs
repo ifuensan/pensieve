@@ -71,16 +71,21 @@ pub async fn export(
     };
 
     // Canonical Nostr event fields; created_at as a unix timestamp (int), the
-    // shape researchers expect. FINAL collapses ReplacingMergeTree duplicates.
+    // shape researchers expect.
+    //
+    // No `FINAL`: on the HDD-backed deployment FINAL is ~40x slower (merge-on-read
+    // across all parts) and `events_local` is a ReplacingMergeTree whose background
+    // merges already keep it deduplicated in practice. A plain scan streams the
+    // full range in seconds; at worst a handful of not-yet-merged rows repeat, and
+    // the event `id` lets a consumer dedupe if it needs strict uniqueness.
     // No ORDER BY: avoids a full sort so large ranges stream with low memory.
     //
-    // SETTINGS cap the blast radius of a large export: this server co-locates
-    // ClickHouse with the live ingester on a single (HDD-backed) host, so we
-    // bound CPU (`max_threads`) to leave cores for ingestion and set a memory
-    // backstop (`max_memory_usage`) against a runaway FINAL merge.
+    // SETTINGS cap the blast radius of a large export on this co-located,
+    // HDD-backed host: `max_threads` leaves cores for the ingester,
+    // `max_memory_usage` is a backstop against a pathological range.
     let sql = format!(
         "SELECT id, pubkey, toUnixTimestamp(created_at) AS created_at, kind, tags, content, sig \
-         FROM events_local FINAL \
+         FROM events_local \
          WHERE {predicate} \
          SETTINGS max_threads = 4, max_memory_usage = 8000000000"
     );

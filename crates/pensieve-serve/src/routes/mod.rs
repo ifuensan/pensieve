@@ -1,5 +1,6 @@
 //! API route definitions.
 
+mod export;
 mod health;
 mod kinds;
 mod relays;
@@ -14,7 +15,7 @@ use axum::response::Response;
 use axum::routing::get;
 use http_body_util::BodyExt;
 
-use crate::auth::require_auth;
+use crate::auth::{require_auth, require_auth_allow_query_token};
 use crate::state::AppState;
 
 /// Build the complete API router.
@@ -136,14 +137,28 @@ pub fn router(state: AppState) -> Router {
         .route("/relays/summary", get(relays::summary))
         .route("/relays", get(relays::list))
         .route("/relays/throughput", get(relays::throughput))
-        // Auth middleware
-        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        // Cache headers middleware
-        .layer(middleware::from_fn(add_cache_headers));
+        // Cache headers middleware (wraps all the stats routes above, which are
+        // small JSON responses safe to buffer for ETag computation).
+        .layer(middleware::from_fn(add_cache_headers))
+        // Header-only auth for the stats endpoints.
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    // Bulk export — streamed download. Kept in its own sub-router so it (a) is
+    // excluded from add_cache_headers, which collects the whole body for ETags
+    // and would defeat streaming / blow up memory on multi-GB exports, and (b)
+    // uses the query-token-aware auth (browser/Grafana download links can't set
+    // an Authorization header) without loosening auth on the other endpoints.
+    let export =
+        Router::new()
+            .route("/export", get(export::export))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_allow_query_token,
+            ));
 
     Router::new()
         .merge(public)
-        .nest("/api/v1", api_v1)
+        .nest("/api/v1", api_v1.merge(export))
         .with_state(state)
 }
 

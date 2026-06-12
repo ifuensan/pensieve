@@ -4,11 +4,17 @@ HTTP API for querying aggregate Nostr data from the Pensieve event store.
 
 ## Authentication
 
-All `/api/v1/*` endpoints require Bearer token authentication.
+All `/api/v1/*` endpoints require token authentication.
 
 ```bash
 curl -H "Authorization: Bearer <your-token>" https://api.example.com/api/v1/stats
 ```
+
+The [`/api/v1/export`](#data-export) endpoint additionally accepts the token as
+a `?token=<your-token>` query parameter, for plain browser links that cannot set
+request headers (e.g. the download buttons embedded in Grafana). This is scoped
+to that one endpoint; all other endpoints are header-only. Prefer the header
+where possible, since URLs may be recorded in logs and history.
 
 Tokens are configured via the `PENSIEVE_API_TOKENS` environment variable (comma-separated list).
 
@@ -962,6 +968,41 @@ Returns hourly event throughput for the last N hours.
   }
 ]
 ```
+
+---
+
+### Data Export
+
+#### `GET /api/v1/export`
+
+Stream raw Nostr events for a fixed date range as a file download. Unlike the
+`/stats/*` endpoints, the response is **not cached or buffered**: it is streamed
+straight from ClickHouse, so multi-GB exports never sit in memory.
+
+**Query parameters**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `range` | Yes | One of `today`, `this_week`, `this_month`, `last_month`, `last_3_months`. Filtered by event time (`created_at`). |
+| `format` | No | `jsonl` (default) or `parquet`. |
+
+Each event row contains `id`, `pubkey`, `created_at` (unix seconds), `kind`,
+`tags`, `content`, `sig`. Duplicates are collapsed (`FINAL`).
+
+**Examples**
+
+```bash
+# JSONL of this month's events
+curl -H "Authorization: Bearer <token>" \
+  "https://api.example.com/api/v1/export?range=this_month" -o this-month.jsonl
+
+# Parquet of the last 3 months (token via query param, e.g. for browser links)
+curl "https://api.example.com/api/v1/export?range=last_3_months&format=parquet&token=<token>" \
+  -o last-3-months.parquet
+```
+
+The response sets `Content-Disposition: attachment` with a `pensieve-<range>.<ext>`
+filename.
 
 ---
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily pre-generation of bulk Pensieve exports to Garage
+
+[Timer]
+# Run nightly (off-peak); the bulk ranges are large.
+OnCalendar=*-*-* 04:00:00
+
+# Spread load if multiple timers fire together.
+RandomizedDelaySec=900
+
+# Catch up a missed run (e.g. server was off).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Pre-generate bulk Pensieve exports and upload them to Garage
+Documentation=https://github.com/andotherstuff/pensieve
+After=network-online.target pensieve-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pensieve
+Group=pensieve
+
+ExecStart=/home/pensieve/pensieve/pensieve-deploy/scripts/export-to-garage.sh
+
+# Environment (PENSIEVE_API_TOKENS, ARCHIVE_REMOTE, STORAGE_BOX_PATH, ...)
+EnvironmentFile=-/home/pensieve/pensieve/pensieve-deploy/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pensieve-export-garage

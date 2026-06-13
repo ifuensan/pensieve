@@ -70,8 +70,14 @@ pub async fn export(
         }
     };
 
-    // Canonical Nostr event fields; created_at as a unix timestamp (int), the
-    // shape researchers expect.
+    // Canonical Nostr event fields; created_at emitted as a unix timestamp (int),
+    // the shape researchers expect.
+    //
+    // The date filter runs in a subquery on the raw `created_at` (DateTime): the
+    // outer `toUnixTimestamp(created_at) AS created_at` would otherwise shadow the
+    // column with a UInt32 alias, and the Date-returning predicates
+    // (`toStartOfMonth(today())`, ...) then fail with "Illegal types (UInt32,
+    // Date)". Filtering before the rename keeps every range working.
     //
     // No `FINAL`: on the HDD-backed deployment FINAL is ~40x slower (merge-on-read
     // across all parts) and `events_local` is a ReplacingMergeTree whose background
@@ -85,8 +91,11 @@ pub async fn export(
     // `max_memory_usage` is a backstop against a pathological range.
     let sql = format!(
         "SELECT id, pubkey, toUnixTimestamp(created_at) AS created_at, kind, tags, content, sig \
-         FROM events_local \
-         WHERE {predicate} \
+         FROM ( \
+             SELECT id, pubkey, created_at, kind, tags, content, sig \
+             FROM events_local \
+             WHERE {predicate} \
+         ) \
          SETTINGS max_threads = 4, max_memory_usage = 8000000000"
     );
 

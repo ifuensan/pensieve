@@ -2,8 +2,14 @@
 //!
 //! Streams raw Nostr events from ClickHouse for a fixed date range, straight to
 //! the client as a download. Unlike the `/stats/*` endpoints this is *not*
-//! cached or buffered: the response body is streamed chunk-by-chunk from
-//! ClickHouse (`fetch_bytes`) so multi-GB exports never sit in memory.
+//! cached or buffered: the body is streamed straight through, so multi-GB
+//! exports never sit in memory.
+//!
+//! The stream is proxied from ClickHouse's HTTP interface with `reqwest`, not
+//! the `clickhouse` crate's `fetch_bytes`: the latter's reader truncates large
+//! binary streams (observed: Parquet exports arriving without their footer, so
+//! unreadable), whereas a plain HTTP proxy returns the full, byte-exact
+//! response.
 //!
 //! Ranges are a closed set mapped to server-side `WHERE` predicates — the
 //! client never supplies raw SQL.
@@ -13,7 +19,6 @@ use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::Response;
 use serde::Deserialize;
-use tokio_util::io::ReaderStream;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -85,22 +90,50 @@ pub async fn export(
     // full range in seconds; at worst a handful of not-yet-merged rows repeat, and
     // the event `id` lets a consumer dedupe if it needs strict uniqueness.
     // No ORDER BY: avoids a full sort so large ranges stream with low memory.
-    //
-    // SETTINGS cap the blast radius of a large export on this co-located,
-    // HDD-backed host: `max_threads` leaves cores for the ingester,
-    // `max_memory_usage` is a backstop against a pathological range.
     let sql = format!(
         "SELECT id, pubkey, toUnixTimestamp(created_at) AS created_at, kind, tags, content, sig \
          FROM ( \
              SELECT id, pubkey, created_at, kind, tags, content, sig \
              FROM events_local \
              WHERE {predicate} \
-         ) \
-         SETTINGS max_threads = 4, max_memory_usage = 8000000000"
+         )"
     );
 
-    let cursor = state.clickhouse.query(&sql).fetch_bytes(ch_format)?;
-    let body = Body::from_stream(ReaderStream::new(cursor));
+    // Settings as URL params (output-only; nothing stored is changed):
+    //   max_threads      — leave cores for the co-located ingester
+    //   max_memory_usage — backstop against a pathological range
+    //   parquet zstd     — ClickHouse's default Parquet codec leaves files
+    //                      several times larger than they need to be
+    let mut query_params: Vec<(&str, String)> = vec![
+        ("database", state.config.clickhouse_database.clone()),
+        ("default_format", ch_format.to_string()),
+        ("max_threads", "4".to_string()),
+        ("max_memory_usage", "8000000000".to_string()),
+    ];
+    if ch_format == "Parquet" {
+        query_params.push((
+            "output_format_parquet_compression_method",
+            "zstd".to_string(),
+        ));
+    }
+
+    let response = reqwest::Client::new()
+        .post(&state.config.clickhouse_url)
+        .query(&query_params)
+        .body(sql)
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
+
+    // Surface a query error (bad SQL, resource limit, ...) as a proper status
+    // *before* streaming, rather than a truncated 200.
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "clickhouse export query failed ({status}): {detail}"
+        )));
+    }
 
     let filename = format!("pensieve-{}.{ext}", params.range);
     Response::builder()
@@ -110,6 +143,6 @@ pub async fn export(
             format!("attachment; filename=\"{filename}\""),
         )
         .header(header::CACHE_CONTROL, "no-store")
-        .body(body)
+        .body(Body::from_stream(response.bytes_stream()))
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))
 }

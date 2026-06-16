@@ -19,8 +19,9 @@ pensieve-core = { path = "../pensieve-core" }
 
 # Async runtime
 tokio.workspace = true
-# Bridges ClickHouse's BytesCursor (AsyncRead) into an axum streaming body.
-tokio-util = { version = "0.7", features = ["io"] }
+# Proxy bulk exports straight from ClickHouse's HTTP interface — the clickhouse
+# crate's streaming reader truncates large binary (Parquet) responses.
+reqwest = { version = "0.12", features = ["stream"] }
 
 # HTTP server
 axum.workspace = true

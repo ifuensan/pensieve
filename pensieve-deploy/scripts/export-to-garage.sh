@@ -35,6 +35,7 @@ REMOTE="${ARCHIVE_REMOTE:-garage}"
 BUCKET="${STORAGE_BOX_PATH:-pensieve-archive}"
 API_URL="${EXPORT_API_URL:-http://127.0.0.1:8080}"
 RANGES="${EXPORT_GARAGE_RANGES:-last_3_months}"
+FORMAT="${EXPORT_GARAGE_FORMAT:-parquet}"
 TMP_DIR="${EXPORT_TMP_DIR:-/data/exports-tmp}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
@@ -47,20 +48,33 @@ fi
 mkdir -p "$TMP_DIR"
 log "Pre-generating exports -> $REMOTE:$BUCKET/exports/  (ranges: $RANGES)"
 
-for range in $RANGES; do
-    tmp="$TMP_DIR/pensieve-$range.jsonl.gz"
+case "$FORMAT" in
+    parquet) ext="parquet" ;;
+    jsonl) ext="jsonl.gz" ;;
+    *) echo "ERROR: EXPORT_GARAGE_FORMAT must be 'parquet' or 'jsonl' (got '$FORMAT')" >&2; exit 1 ;;
+esac
 
-    # --fail aborts on a non-2xx status; pipefail + set -e abort on a mid-stream
-    # error, so we never upload a truncated export.
-    log "Exporting '$range' from API ..."
-    curl --fail --silent --show-error \
-        -H "Authorization: Bearer $API_TOKEN" \
-        "$API_URL/api/v1/export?range=$range&format=jsonl" \
-        | gzip > "$tmp"
+for range in $RANGES; do
+    tmp="$TMP_DIR/pensieve-$range.$ext"
+
+    # --fail aborts on a non-2xx status; writing to a temp file (then copyto)
+    # means a mid-stream error fails the step before anything is uploaded, so we
+    # never publish a truncated export. Parquet is already compressed (no gzip);
+    # jsonl is gzipped on the way out.
+    log "Exporting '$range' as $FORMAT from API ..."
+    if [ "$FORMAT" = "parquet" ]; then
+        curl --fail --silent --show-error \
+            -H "Authorization: Bearer $API_TOKEN" \
+            "$API_URL/api/v1/export?range=$range&format=parquet" -o "$tmp"
+    else
+        curl --fail --silent --show-error \
+            -H "Authorization: Bearer $API_TOKEN" \
+            "$API_URL/api/v1/export?range=$range&format=jsonl" | gzip > "$tmp"
+    fi
 
     size=$(stat -c %s "$tmp")
-    log "  $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size bytes") gzipped; uploading ..."
-    rclone copyto "$tmp" "$REMOTE:$BUCKET/exports/pensieve-$range.jsonl.gz" \
+    log "  $(numfmt --to=iec --suffix=B "$size" 2>/dev/null || echo "$size bytes"); uploading ..."
+    rclone copyto "$tmp" "$REMOTE:$BUCKET/exports/pensieve-$range.$ext" \
         --stats-one-line --log-level INFO
     rm -f "$tmp"
     log "  '$range' done."
